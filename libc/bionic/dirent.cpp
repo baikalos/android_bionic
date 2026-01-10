@@ -42,6 +42,8 @@
 #include "private/ErrnoRestorer.h"
 #include "private/ScopedPthreadMutexLocker.h"
 
+#include "baikal_filter.h"
+
 extern "C" int __getdents64(unsigned int, dirent*, unsigned int);
 
 // Apportable decided to copy the data structure from this file
@@ -110,8 +112,16 @@ static bool __fill_DIR(DIR* d) {
   if (rc <= 0) {
     return false;
   }
+
+  rc = filter_dirent_buffer(d->buff_, rc);
+
   d->available_bytes_ = rc;
   d->next_ = d->buff_;
+
+  if (rc == 0) {
+    return __fill_DIR(d);
+  }
+
   return true;
 }
 
