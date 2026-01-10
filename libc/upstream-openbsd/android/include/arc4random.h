@@ -61,7 +61,7 @@ static inline int _rs_allocate(struct _rs** rsp, struct _rsx** rsxp) {
 
   // Equivalent to OpenBSD's minherit(MAP_INHERIT_ZERO).
   if (madvise(p, size, MADV_WIPEONFORK) == -1) {
-    async_safe_fatal("arc4random data MADV_WIPEONFORK failed: %m");
+    //async_safe_fatal("arc4random data MADV_WIPEONFORK failed: %m");
   }
 
   // Give the allocation a name to make tombstones more intelligible.

@@ -53,6 +53,12 @@
 #define SERIAL_VALUE_LEN(serial) ((serial) >> 24)
 #define APPCOMPAT_PREFIX "ro.appcompat_override."
 
+extern _Atomic(int) g_filter_active;
+extern _Atomic(int) g_filter_extra;
+extern _Atomic(int) g_filter_debug;
+extern _Atomic(int) g_filter_spoofer;
+extern _Atomic(int) g_filter_adb;
+
 static bool is_dir(const char* pathname) {
   struct stat info;
   if (stat(pathname, &info) == -1) {
@@ -181,6 +187,39 @@ static bool is_read_only(const char* name) {
   return strncmp(name, "ro.", 3) == 0;
 }
 
+static bool overrideMutableKeyValue(const char *key, const char *value, const char* name,  char *value_buf) {
+    if( strstr(name,key) != NULL ) {
+        memcpy(value_buf,value,strlen(value)+1);
+        return true;
+    }
+    return false;
+}
+
+static bool overrideMutableValue(const char* key, char *value_buf) {
+
+    if( !g_filter_adb ) return false;
+    if( overrideMutableKeyValue("ro.adb.secure","1",key,value_buf) ) return true;
+
+    if( overrideMutableKeyValue("sys.usb.config","mtp",key,value_buf) ) return true;
+    if( overrideMutableKeyValue("persist.sys.usb.config","mtp",key,value_buf) ) return true;
+
+    if( overrideMutableKeyValue("init.svc.adbd","stopped",key,value_buf) ) return true;
+    if( overrideMutableKeyValue("init.svc.adb_root","stopped",key,value_buf) ) return true;
+    if( overrideMutableKeyValue("init.svc_debug_pid.adbd","",key,value_buf) ) return true;
+    if( overrideMutableKeyValue("sys.usb.adb.disabled","1",key,value_buf) ) return true;
+
+
+    if( overrideMutableKeyValue("ro.boottime.adbd","",key,value_buf) ) return true;
+    if( overrideMutableKeyValue("init.svc_debug_pid","",key,value_buf) ) return true;
+    if( overrideMutableKeyValue("persist.adb.","",key,value_buf) ) return true;
+
+    if( overrideMutableKeyValue("vendor.sys.usb.adb.disabled","1",key,value_buf) ) return true;
+    if( overrideMutableKeyValue("vendor.usb.config","mtp",key,value_buf) ) return true;
+    if( overrideMutableKeyValue("adb","0",key,value_buf) ) return true;
+    return false;
+}
+
+
 uint32_t SystemProperties::ReadMutablePropertyValue(const prop_info* pi, char* value) {
   // We assume the memcpy below gets serialized by the acquire fence.
   uint32_t new_serial = load_const_atomic(&pi->serial, memory_order_acquire);
@@ -196,6 +235,9 @@ uint32_t SystemProperties::ReadMutablePropertyValue(const prop_info* pi, char* v
     } else {
       memcpy(value, pi->value, len + 1);
     }
+
+    overrideMutableValue(pi->name, value);
+
     atomic_thread_fence(memory_order_acquire);
     new_serial = load_const_atomic(&pi->serial, memory_order_relaxed);
     if (__predict_true(serial == new_serial)) {
@@ -231,9 +273,105 @@ int SystemProperties::Read(const prop_info* pi, char* name, char* value) {
         " __system_property_get()/__system_property_read(); use"
         " __system_property_read_callback() instead.",
         pi->name, strlen(pi->long_value()));
+  } else {
+    if( g_filter_debug ) {
+      async_safe_format_log(ANDROID_LOG_INFO, "BaikalBionic", "BAIKAL_LOG LG | UID: %d | PID: %d | PROC: %s | PROP: %s | VALUE: %s | RETURN: %s", (int)getuid(), (int)getpid(), (getprogname() ? getprogname() : "unknown"), pi->name, pi->value, value);
+    }
   }
+
   return SERIAL_VALUE_LEN(serial);
 }
+
+bool overrideValue(const char *name, const char *ovr, void* cookie, const char *key, const char *value, uint32_t serial,
+                                    void (*callback)(void* cookie, const char* name,
+                                                     const char* value, uint32_t serial) ) {
+    char value_buf[PROP_VALUE_MAX];
+
+    (void)value;
+
+    if (strstr(key, name) != NULL) {
+        strlcpy(value_buf, ovr, PROP_VALUE_MAX);
+        callback(cookie, key, value_buf, serial);
+
+        if( g_filter_debug ) {
+            async_safe_format_log(ANDROID_LOG_INFO, "BaikalBionic", "BAIKAL_LOG | UID: %d | PID: %d | PROC: %s | PROP: %s | VALUE: %s | OVERRIDE: %s", 
+            (int)getuid(), (int)getpid(), (getprogname() ? getprogname() : "unknown"), key, value, value_buf);
+        }
+
+        return true;
+    }
+
+    return false;
+}
+
+bool overridePropertyValue(void* cookie, const char *key, const char *value, uint32_t serial,
+                                    void (*callback)(void* cookie, const char* name,
+                                                     const char* value, uint32_t serial) ) {
+
+
+    char value_buf[PROP_VALUE_MAX];
+
+    (void)value;
+
+    if (strcmp(key, "ro.baikal.build.date.utc") == 0) {
+        strlcpy(value_buf, "1767991008", PROP_VALUE_MAX);
+        callback(cookie, key, value_buf, serial);
+        return true;
+    }
+
+    /*
+    if (strcmp(key, "ro.vendor.api_level") == 0) {
+        strlcpy(value_buf, "34", PROP_VALUE_MAX);
+        callback(cookie, key, value_buf, serial);
+        return true;
+    }
+
+    if (strcmp(key, "ro.product.first_api_level") == 0) {
+        strlcpy(value_buf, "34", PROP_VALUE_MAX);
+        callback(cookie, key, value_buf, serial);
+        return true;
+    }
+
+    if (strcmp(key, "ro.build.version.security_patch") == 0) {
+        strlcpy(value_buf, "2026-01-05", PROP_VALUE_MAX);
+        callback(cookie, key, value_buf, serial);
+        return true;
+    }*/
+
+    return false;
+}
+
+
+
+bool overrideAdbPropertyValue(void* cookie, const char *key, const char *value, uint32_t serial,
+                                    void (*callback)(void* cookie, const char* name,
+                                                     const char* value, uint32_t serial) ) {
+
+
+    if ( overrideValue("ro.adb.secure","1",cookie,key,value,serial,callback) ) return true;
+
+    if ( overrideValue("sys.usb.config","mtp",cookie,key,value,serial,callback) ) return true;
+    if ( overrideValue("persist.sys.usb.config","mtp",cookie,key,value,serial,callback) ) return true;
+
+    if ( overrideValue("init.svc.adbd","stopped",cookie,key,value,serial,callback) ) return true;
+    if ( overrideValue("init.svc.adb_root","stopped",cookie,key,value,serial,callback) ) return true;
+    if ( overrideValue("init.svc_debug_pid.adbd","",cookie,key,value,serial,callback) ) return true;
+    if ( overrideValue("sys.usb.adb.disabled","1",cookie,key,value,serial,callback) ) return true;
+
+
+    if ( overrideValue("ro.boottime.adbd","",cookie,key,value,serial,callback) ) return true;
+    if ( overrideValue("init.svc_debug_pid","",cookie,key,value,serial,callback) ) return true;
+    if ( overrideValue("persist.adb.","",cookie,key,value,serial,callback) ) return true;
+
+    if ( overrideValue("vendor.sys.usb.adb.disabled","1",cookie,key,value,serial,callback) ) return true;
+    if ( overrideValue("vendor.usb.config","mtp",cookie,key,value,serial,callback) ) return true;
+    if ( overrideValue("adb","0",cookie,key,value,serial,callback) ) return true;
+
+    //if ( overrideValue("persist.adb.","",key,value,serial,callback) ) return true;
+
+    return false;
+}
+
 
 void SystemProperties::ReadCallback(const prop_info* pi,
                                     void (*callback)(void* cookie, const char* name,
@@ -244,15 +382,29 @@ void SystemProperties::ReadCallback(const prop_info* pi,
   if (is_read_only(pi->name)) {
     uint32_t serial = load_const_atomic(&pi->serial, memory_order_relaxed);
     if (pi->is_long()) {
+      if( g_filter_debug ) {
+        async_safe_format_log(ANDROID_LOG_INFO, "BaikalBionic", "BAIKAL_LOG RO LONG | UID: %d | PID: %d | PROC: %s | PROP: %s | VALUE: %s", (int)getuid(), (int)getpid(), (getprogname() ? getprogname() : "unknown"), pi->name, pi->long_value());
+      }
       callback(cookie, pi->name, pi->long_value(), serial);
     } else {
+      if( g_filter_adb && overrideAdbPropertyValue(cookie,pi->name, pi->value,serial,callback) ) return;
+      if( g_filter_spoofer && overridePropertyValue(cookie,pi->name, pi->value,serial,callback) ) return;
+      if( g_filter_debug ) {
+        async_safe_format_log(ANDROID_LOG_INFO, "BaikalBionic", "BAIKAL_LOG RO | UID: %d | PID: %d | PROC: %s | PROP: %s | VALUE: %s", (int)getuid(), (int)getpid(), (getprogname() ? getprogname() : "unknown"), pi->name, pi->value);
+      }
       callback(cookie, pi->name, pi->value, serial);
     }
+
     return;
   }
 
   char value_buf[PROP_VALUE_MAX];
   uint32_t serial = ReadMutablePropertyValue(pi, value_buf);
+  if( g_filter_adb && overrideAdbPropertyValue(cookie,pi->name, value_buf,serial,callback) ) return;
+  if( g_filter_spoofer && overridePropertyValue(cookie,pi->name, value_buf,serial,callback) ) return;
+  if( g_filter_debug ) {
+    async_safe_format_log(ANDROID_LOG_INFO, "BaikalBionic", "BAIKAL_LOG | UID: %d | PID: %d | PROC: %s | PROP: %s | VALUE: %s", (int)getuid(), (int)getpid(), (getprogname() ? getprogname() : "unknown"), pi->name, value_buf);
+  }
   callback(cookie, pi->name, value_buf, serial);
 }
 
