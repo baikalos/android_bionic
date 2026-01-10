@@ -42,6 +42,8 @@
 
 #include "private/ScopedSignalBlocker.h"
 
+#include "baikal_filter.h"
+
 enum Action {
   kOpen,
   kClose,
@@ -169,6 +171,11 @@ static int posix_spawn(pid_t* pid_ptr,
   // and https://pubs.opengroup.org/onlinepubs/9799919799.2024edition/functions/posix_spawn.html
 
   ScopedSignalBlocker ssb;
+
+  if (is_caller_filtered() && is_blacklisted(path)) {
+    // errno = ENOENT;
+    return ENOENT;
+  }
 
   short flags = attr ? (*attr)->flags : 0;
   bool use_vfork = ((flags & POSIX_SPAWN_USEVFORK) != 0) || (actions == nullptr && flags == 0);

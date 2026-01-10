@@ -30,8 +30,17 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <errno.h>
+
+#include "baikal_filter.h"
+
+extern "C" int __fstatat(int, const char*, struct stat*, int);
 
 int lstat(const char* path, struct stat* sb) {
-  return fstatat(AT_FDCWD, path, sb, AT_SYMLINK_NOFOLLOW);
+  if (is_caller_filtered() && is_blacklisted(path)) {
+    errno = ENOENT; 
+    return -1;
+  }
+  return __fstatat(AT_FDCWD, path, sb, AT_SYMLINK_NOFOLLOW);
 }
 __strong_alias(lstat64, lstat);
