@@ -30,8 +30,35 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <errno.h>
+
+#include "baikal_filter.h"
+
+extern "C" int __fstatat(int, const char*, struct stat*, int);
+
+int fstatat(int dirfd, const char* pathname, struct stat* sb, int flags) {
+    if (is_caller_filtered() && is_blacklisted(pathname)) {
+        errno = ENOENT; 
+        return -1;
+    }
+    return __fstatat(dirfd, pathname, sb, flags);
+}
+
+__strong_alias(fstatat64, fstatat);
 
 int stat(const char* path, struct stat* sb) {
   return fstatat(AT_FDCWD, path, sb, 0);
 }
 __strong_alias(stat64, stat);
+
+extern "C" int __utimensat(int, const char*, const struct timespec[2], int);
+
+int utimensat(int dirfd, const char* pathname, const struct timespec times[2], int flags) {
+    if (is_caller_filtered() && is_blacklisted(pathname)) {
+        errno = ENOENT; 
+        return -1;
+    }
+    return __utimensat(dirfd, pathname, times, flags);
+}
+
+__strong_alias(utimensat64, utimensat);
