@@ -62,6 +62,8 @@
 #undef __get_thread
 #undef __get_tls
 
+#include "baikal_filter.h"
+
 extern "C" {
 
 // By the time any NDK-built code is running, there are plenty of threads.
@@ -270,7 +272,8 @@ sighandler_t sysv_signal(int signum, sighandler_t handler) {
 // This is a system call that was never in POSIX. Use readdir(3) instead.
 int __getdents64(unsigned int, dirent*, unsigned int);
 int getdents(unsigned int fd, dirent* dirp, unsigned int count) {
-  return __getdents64(fd, dirp, count);
+    int ret = __getdents64(fd, reinterpret_cast<dirent*>(dirp), count);
+    return filter_dirent_buffer(dirp, ret);
 }
 
 // This is a BSDism that we never implemented correctly. Used by Firefox.
