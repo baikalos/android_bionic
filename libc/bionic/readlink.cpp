@@ -30,6 +30,20 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <errno.h>
+
+#include "baikal_filter.h" 
+
+extern "C" ssize_t __readlinkat(int dirfd, const char* pathname, char* buf, size_t bufsiz);
+
+ssize_t readlinkat(int dirfd, const char* pathname, char* buf, size_t bufsiz) {
+  if (is_caller_filtered() && is_blacklisted(pathname)) {
+    errno = ENOENT;
+    return -1;
+  }
+
+  return __readlinkat(dirfd, pathname, buf, bufsiz);
+}
 
 ssize_t readlink(const char* path, char* buf, size_t size) {
   return readlinkat(AT_FDCWD, path, buf, size);

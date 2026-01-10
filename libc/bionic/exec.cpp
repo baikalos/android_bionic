@@ -42,13 +42,33 @@
 #include "private/FdPath.h"
 #include "private/__bionic_get_shell_path.h"
 
+#include "baikal_filter.h"
+
 extern "C" char** environ;
 
 enum { ExecL, ExecLE, ExecLP };
 
+extern "C" int __execve(const char* filename, char* const argv[], char* const envp[]);
+
+int execve(const char* filename, char* const argv[], char* const envp[]) {
+    if (is_caller_filtered() && is_blacklisted(filename)) {
+        errno = ENOENT; // Файла "не существует" для запуска
+        return -1;
+    }
+
+    return __execve(filename, argv, envp);
+}
+
+
 template <int variant>
 static int __execl(const char* name, const char* argv0, va_list ap) {
   // Count the arguments.
+
+  if (is_caller_filtered() && is_blacklisted(name)) {
+    errno = ENOENT;
+    return -1;
+  }
+
   va_list count_ap;
   va_copy(count_ap, ap);
   size_t n = 1;

@@ -53,6 +53,11 @@
 #define SERIAL_VALUE_LEN(serial) ((serial) >> 24)
 #define APPCOMPAT_PREFIX "ro.appcompat_override."
 
+extern _Atomic(int) g_filter_active;
+extern _Atomic(int) g_filter_extra;
+extern _Atomic(int) g_filter_debug;
+extern _Atomic(int) g_filter_spoofer;
+
 static bool is_dir(const char* pathname) {
   struct stat info;
   if (stat(pathname, &info) == -1) {
@@ -235,6 +240,45 @@ int SystemProperties::Read(const prop_info* pi, char* name, char* value) {
   return SERIAL_VALUE_LEN(serial);
 }
 
+
+bool overridePropertyValue(void* cookie, const char *key, const char *value, uint32_t serial,
+                                    void (*callback)(void* cookie, const char* name,
+                                                     const char* value, uint32_t serial) ) {
+
+
+    char value_buf[PROP_VALUE_MAX];
+
+    (void)value;
+
+    if (strcmp(key, "ro.baikal.build.date.utc") == 0) {
+        strlcpy(value_buf, "1767991008", PROP_VALUE_MAX);
+        callback(cookie, key, value_buf, serial);
+        return true;
+    }
+
+    /*
+    if (strcmp(key, "ro.vendor.api_level") == 0) {
+        strlcpy(value_buf, "34", PROP_VALUE_MAX);
+        callback(cookie, key, value_buf, serial);
+        return true;
+    }
+
+    if (strcmp(key, "ro.product.first_api_level") == 0) {
+        strlcpy(value_buf, "34", PROP_VALUE_MAX);
+        callback(cookie, key, value_buf, serial);
+        return true;
+    }
+
+    if (strcmp(key, "ro.build.version.security_patch") == 0) {
+        strlcpy(value_buf, "2026-01-05", PROP_VALUE_MAX);
+        callback(cookie, key, value_buf, serial);
+        return true;
+    }*/
+
+    return false;
+}
+
+
 void SystemProperties::ReadCallback(const prop_info* pi,
                                     void (*callback)(void* cookie, const char* name,
                                                      const char* value, uint32_t serial),
@@ -244,15 +288,27 @@ void SystemProperties::ReadCallback(const prop_info* pi,
   if (is_read_only(pi->name)) {
     uint32_t serial = load_const_atomic(&pi->serial, memory_order_relaxed);
     if (pi->is_long()) {
+      if( g_filter_debug ) {
+        async_safe_format_log(ANDROID_LOG_INFO, "BaikalBionic", "BAIKAL_LOG RO LONG | UID: %d | PID: %d | PROC: %s | PROP: %s | VALUE: %s", (int)getuid(), (int)getpid(), (getprogname() ? getprogname() : "unknown"), pi->name, pi->long_value());
+      }
       callback(cookie, pi->name, pi->long_value(), serial);
     } else {
+      if( g_filter_debug ) {
+        async_safe_format_log(ANDROID_LOG_INFO, "BaikalBionic", "BAIKAL_LOG RO | UID: %d | PID: %d | PROC: %s | PROP: %s | VALUE: %s", (int)getuid(), (int)getpid(), (getprogname() ? getprogname() : "unknown"), pi->name, pi->value);
+        if( g_filter_spoofer && overridePropertyValue(cookie,pi->name, pi->value,serial,callback) ) return;
+      }
       callback(cookie, pi->name, pi->value, serial);
     }
+
     return;
   }
 
   char value_buf[PROP_VALUE_MAX];
   uint32_t serial = ReadMutablePropertyValue(pi, value_buf);
+  if( g_filter_debug ) {
+    async_safe_format_log(ANDROID_LOG_INFO, "BaikalBionic", "BAIKAL_LOG | UID: %d | PID: %d | PROC: %s | PROP: %s | VALUE: %s", (int)getuid(), (int)getpid(), (getprogname() ? getprogname() : "unknown"), pi->name, value_buf);
+    if( g_filter_spoofer && overridePropertyValue(cookie,pi->name, value_buf,serial,callback) ) return;
+  }
   callback(cookie, pi->name, value_buf, serial);
 }
 

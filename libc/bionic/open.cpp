@@ -33,6 +33,7 @@
 
 #include "private/bionic_fdtrack.h"
 #include "private/bionic_fortify.h"
+#include "baikal_filter.h"
 
 extern "C" int __openat(int, const char*, int, int);
 
@@ -56,6 +57,11 @@ __strong_alias(creat64, creat);
 int open(const char* pathname, int flags, ...) {
   mode_t mode = 0;
 
+  if (is_caller_filtered() && is_blacklisted(pathname)) {
+    errno = ENOENT;
+    return -1;
+  }
+
   if (needs_mode(flags)) {
     va_list args;
     va_start(args, flags);
@@ -69,11 +75,20 @@ __strong_alias(open64, open);
 
 int __open_2(const char* pathname, int flags) {
   if (needs_mode(flags)) __fortify_fatal("open: called with O_CREAT/O_TMPFILE but no mode");
+  if (is_caller_filtered() && is_blacklisted(pathname)) {
+    errno = ENOENT;
+    return -1;
+  }
   return FDTRACK_CREATE_NAME("open", __openat(AT_FDCWD, pathname, force_O_LARGEFILE(flags), 0));
 }
 
 int openat(int fd, const char *pathname, int flags, ...) {
   mode_t mode = 0;
+
+  if (is_caller_filtered() && is_blacklisted(pathname)) {
+    errno = ENOENT;
+    return -1;
+  }
 
   if (needs_mode(flags)) {
     va_list args;
@@ -88,5 +103,9 @@ __strong_alias(openat64, openat);
 
 int __openat_2(int fd, const char* pathname, int flags) {
   if (needs_mode(flags)) __fortify_fatal("open: called with O_CREAT/O_TMPFILE but no mode");
+  if (is_caller_filtered() && is_blacklisted(pathname)) {
+    errno = ENOENT;
+    return -1;
+  }
   return FDTRACK_CREATE_NAME("openat", __openat(fd, pathname, force_O_LARGEFILE(flags), 0));
 }
