@@ -38,6 +38,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <android/api-level.h>
+#include <async_safe/log.h>
 
 #include <bionic/pthread_internal.h>
 #include "private/bionic_globals.h"
@@ -138,6 +139,23 @@ static void* dlopen_ext(const char* filename,
                         int flags,
                         const android_dlextinfo* extinfo,
                         const void* caller_addr) {
+
+#if defined(__LP64__)
+  std::string rewritten_filename;
+
+  if (filename != nullptr &&
+      strncmp(filename, "/vendor/lib/", sizeof("/vendor/lib/") - 1) == 0) {
+    rewritten_filename = "/vendor/lib64";
+    rewritten_filename += filename + sizeof("/vendor/lib") - 1;
+
+    async_safe_format_log(ANDROID_LOG_INFO, "linker",
+                      "dlopen: redirecting %s -> %s",
+                      filename, rewritten_filename.c_str());
+
+    filename = rewritten_filename.c_str();
+  }
+#endif
+
   ScopedPthreadMutexLocker locker(&g_dl_mutex);
   g_linker_logger.ResetState();
   void* result = do_dlopen(filename, flags, extinfo, caller_addr);

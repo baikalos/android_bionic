@@ -94,7 +94,7 @@ setpgid(pid_t, pid_t)  all
 setregid:setregid32(gid_t, gid_t)  lp32
 setregid(gid_t, gid_t)    lp64
 chroot(const char*)  all
-prctl(int, unsigned long, unsigned long, unsigned long, unsigned long) all
+__prctl:prctl(int, unsigned long, unsigned long, unsigned long, unsigned long) all
 capget(cap_user_header_t header, cap_user_data_t data) all
 capset(cap_user_header_t header, const cap_user_data_t data) all
 sigaltstack(const stack_t*, stack_t*) all
@@ -313,7 +313,7 @@ sched_setscheduler(pid_t, int, const sched_param*)  all
 sched_yield(void) all
 
 # other
-uname(struct utsname*)  all
+__uname:uname(struct utsname*)  all
 umask(mode_t)  all
 __reboot:reboot(int, int, int, void*)  all
 init_module(void*, unsigned long, const char*)  all
