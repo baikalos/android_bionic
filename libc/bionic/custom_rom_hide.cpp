@@ -24,18 +24,38 @@
 #include <linux/memfd.h>
 #include <linux/stat.h>
 #include <pthread.h>
+#include <sched.h>
 #include <stdio.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+#include <async_safe/log.h>
+#include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/statfs.h>
 #include <sys/syscall.h>
 #include <sys/sysmacros.h>
 #include <sys/uio.h>
+#include <sys/utsname.h>
 #include <unistd.h>
 #include <private/android_filesystem_config.h>
 #include <private/bionic_lock.h>
+
+#define LOG_TAG "BaikalFS"
+
+// #define AID_ISOLATED_START 99000
+#define AID_ISOLATED_END   99999
+
+#define AID_SDK_SANDBOX_START 20000
+#define AID_SDK_SANDBOX_END   29999
+
+_Atomic(int) g_filter_active = 0;
+// _Atomic(int) g_filter_extra  = 0;
+_Atomic(int) g_filter_debug  = 0;
+// _Atomic(int) g_filter_spoofer = 0;
+// _Atomic(int) g_filter_adb = 0;
+
+extern "C" int __prctl(int, unsigned long, unsigned long, unsigned long, unsigned long);
 
 #define HIDE_MEMFD_TAG "mf"
 #define HIDE_MEMFD_NAME_PREFIX HIDE_MEMFD_TAG ":"
@@ -154,6 +174,181 @@ static const PartitionDevEntry kPartitionDmMap[] = {
 };
 
 static _Atomic(uint64_t) g_substituted_fd_bits[HIDE_TRACKED_FD_WORD_COUNT];
+
+static ssize_t safe_copy_string(const char* addr, char* buf, size_t size);
+
+
+static bool return_log(const char* name, bool result, const char* rule, int type) {
+    if ((!type && result) || atomic_load(&g_filter_debug)) {
+
+        char local[512];
+        if (safe_copy_string(name, local, sizeof(local)) < 0) {
+            return result;
+        }
+
+        async_safe_format_log(ANDROID_LOG_DEBUG, LOG_TAG, 
+            "%s [%s] for UID %d (PID %d) rule [%s] result bool [%d] type [%d]", 
+            !type ? "blocked" : "allowed", local, getuid(), getpid(), rule, result, type);
+    }
+    return result;
+}
+
+static ssize_t return_log_ssize_t(const char* name, ssize_t result, const char* rule, int type) {
+    if (!type || atomic_load(&g_filter_debug)) {
+
+        char local[512];
+        if (safe_copy_string(name, local, sizeof(local)) < 0) {
+            return result;
+        }
+
+        async_safe_format_log(ANDROID_LOG_DEBUG, LOG_TAG, 
+            "%s [%s] for UID %d (PID %d) rule [%s] result ssize_t [%zd] type [%d]", 
+            !type ? "blocked" : "allowed", local, getuid(), getpid(), rule, result, type);
+    }
+    return result;
+}
+
+static int return_log_int(const char* name, int result, const char* rule, int type) {
+    if (!type || atomic_load(&g_filter_debug)) {
+
+        char local[512];
+        if (safe_copy_string(name, local, sizeof(local)) < 0) {
+            return result;
+        }
+
+        async_safe_format_log(ANDROID_LOG_DEBUG, LOG_TAG, 
+            "%s [%s] for UID %d (PID %d) rule [%s] result int [%d] type [%d]", 
+            !type ? "blocked" : "allowed", local, getuid(), getpid(), rule, result, type);
+    }
+    return result;
+}
+
+static const char * return_log_p(const char* name, const char *result, const char* rule, int type) {
+    if (!type || atomic_load(&g_filter_debug)) {
+
+        char local[512];
+        if (safe_copy_string(name, local, sizeof(local)) < 0) {
+            return result;
+        }
+
+        async_safe_format_log(ANDROID_LOG_DEBUG, LOG_TAG, 
+            "%s [%s] for UID %d (PID %d) rule [%s] type [%d]", 
+            !type ? "blocked" : "allowed", local, getuid(), getpid(), rule, type);
+    }
+    return result;
+}
+
+static _Atomic(int) g_env_init_state = 0;
+
+static void sync_env_flags() {
+    int expected = 0;
+
+    int uid = getuid();
+    if( uid < 10000 ) {
+        atomic_store(&g_env_init_state, 2);
+        return;
+    }
+
+    if (!getenv("BAIKAL_ENV_READY")) return;
+
+    if (atomic_compare_exchange_strong(&g_env_init_state, &expected, 1)) {
+        
+        if (getenv("BAIKAL_FILTER_ACTIVE")) atomic_store(&g_filter_active, 1);
+        //if (getenv("BAIKAL_FILTER_EXTRA")) atomic_store(&g_filter_extra, 1);
+        if (getenv("BAIKAL_FILTER_DEBUG")) atomic_store(&g_filter_debug, 1);
+        //if (getenv("BAIKAL_FILTER_ADB")) atomic_store(&g_filter_adb, 1);
+        //if (getenv("BAIKAL_FILTER_SPOOF")) atomic_store(&g_filter_spoofer, 1);
+
+        if ((uid >= AID_ISOLATED_START && uid <= AID_ISOLATED_END) ||
+            (uid >= AID_SDK_SANDBOX_START && uid <= AID_SDK_SANDBOX_END)) {
+
+            async_safe_format_log(ANDROID_LOG_DEBUG, LOG_TAG, "ISOLATED/SANDBOXED sync UID %d (PID %d) is (%d %d)", 
+                              getuid(), getpid(), g_filter_active, /*g_filter_extra,*/ g_filter_debug/*, g_filter_adb, g_filter_spoofer*/);
+       
+        }
+
+        atomic_store(&g_filter_active, 1);
+
+        atomic_store(&g_env_init_state, 2);
+
+        async_safe_format_log(ANDROID_LOG_DEBUG, LOG_TAG, "sync UID %d (PID %d) is (%d %d)", 
+                              getuid(), getpid(), g_filter_active, /*g_filter_extra,*/ g_filter_debug/*, g_filter_adb, g_filter_spoofer*/);
+        
+    } else {
+        while (atomic_load(&g_env_init_state) == 1) {
+            sched_yield(); 
+        }
+    }
+    
+}
+
+bool is_caller_filtered() {
+    if (atomic_load(&g_env_init_state) == 2) return (atomic_load(&g_filter_active) != 0);
+
+    sync_env_flags();
+
+    return (atomic_load(&g_filter_active) != 0);
+    // return false;
+}
+
+extern "C" __attribute__((weak)) int prctl(int option, ...) {
+    va_list args;
+    va_start(args, option);
+    
+    // Extract all 4 potential arguments as unsigned long
+    unsigned long arg2 = va_arg(args, unsigned long);
+    unsigned long arg3 = va_arg(args, unsigned long);
+    unsigned long arg4 = va_arg(args, unsigned long);
+    unsigned long arg5 = va_arg(args, unsigned long);
+    
+    va_end(args);
+
+    if (option == 0x626169) {
+        // Using static_cast to satisfy -Wold-style-cast
+        int val = static_cast<int>(arg3);
+        switch (arg2) {
+            case 1: 
+                atomic_store(&g_filter_active, val);
+                setenv("BAIKAL_FILTER_ACTIVE", val ? "1" : "0", 1);
+                async_safe_format_log(ANDROID_LOG_DEBUG, LOG_TAG, "prctl ACTIVE UID %d (PID %d) is (%d)", 
+                              getuid(), getpid(), g_filter_active);
+                break;
+            case 2: 
+//                atomic_store(&g_filter_extra, val);
+//                setenv("BAIKAL_FILTER_EXTRA", val ? "1" : "0", 1);
+//                async_safe_format_log(ANDROID_LOG_DEBUG, LOG_TAG, "prctl EXTRA UID %d (PID %d) is (%d)", 
+//                              getuid(), getpid(), g_filter_extra);
+                break;
+            case 3: 
+                atomic_store(&g_filter_debug, val);
+                setenv("BAIKAL_FILTER_DEBUG", val ? "1" : "0", 1);
+                async_safe_format_log(ANDROID_LOG_DEBUG, LOG_TAG, "prctl DEBUG UID %d (PID %d) is (%d)", 
+                              getuid(), getpid(), g_filter_debug);
+                break;
+            case 4: 
+//                atomic_store(&g_filter_spoofer, val);
+//                setenv("BAIKAL_FILTER_SPOOF", val ? "1" : "0", 1);
+//                async_safe_format_log(ANDROID_LOG_DEBUG, LOG_TAG, "prctl SPOOF UID %d (PID %d) is (%d)", 
+//                              getuid(), getpid(), g_filter_spoofer);
+                break;
+            case 5: 
+//                atomic_store(&g_filter_adb, val);
+//                setenv("BAIKAL_FILTER_ADB", val ? "1" : "0", 1);
+//                async_safe_format_log(ANDROID_LOG_DEBUG, LOG_TAG, "prctl ADB UID %d (PID %d) is (%d)", 
+//                              getuid(), getpid(), g_filter_adb);
+                break;
+            default:
+                async_safe_format_log(ANDROID_LOG_DEBUG, LOG_TAG, 
+                    "prctl UNKNOWN flag %lu set to %lu for UID %d (PID %d)", 
+                    arg2, arg3, getuid(), getpid());
+                break;
+        }
+        return 0;
+    }
+
+    // Pass arguments to the real syscall
+    return __prctl(option, arg2, arg3, arg4, arg5);
+}
 
 static bool is_trackable_fd(int fd) {
     return fd >= 0 && fd < HIDE_TRACKED_FD_LIMIT;
@@ -371,6 +566,7 @@ static bool is_exempt_process() {
 
 static bool is_app_process() {
     if ((getuid() % AID_USER_OFFSET) < AID_APP_START) return false;
+    if (!is_caller_filtered()) return false;
     if (is_exempt_process()) return false;
     return true;
 }
@@ -526,12 +722,12 @@ bool custom_rom_hide_should_block(const char* path) {
     char local[512];
     if (safe_copy_string(path, local, sizeof(local)) < 0) return false;
     if (local[0] != '/') return false;
-    return is_rom_path(local);
+    return return_log(path, is_rom_path(path), "custom_rom_hide_should_block", 0);
 }
 
 bool custom_rom_hide_should_block_at(int dirfd, const char* path) {
     if (!path || reinterpret_cast<uintptr_t>(path) < 0x1000000) return false;
-    if (!is_app_process()) return false;
+    if (!is_app_process()) return return_log(path, false, "custom_rom_hide_should_block_at", 2);
 
     int saved_errno = errno;
     bool result = false;
@@ -567,7 +763,7 @@ bool custom_rom_hide_should_block_at(int dirfd, const char* path) {
     }
 
     errno = saved_errno;
-    return result;
+    return return_log(path, result, "custom_rom_hide_should_block_at", 0); 
 }
 
 bool custom_rom_hide_is_symlink(const char* path) {
@@ -586,11 +782,11 @@ bool custom_rom_hide_is_empty_path(const char* path) {
 
 bool custom_rom_hide_should_filter_dirent(int dirfd, const char* name) {
     if (!name || reinterpret_cast<uintptr_t>(name) < 0x1000000) return false;
-    if (!is_app_process()) return false;
+    if (!is_app_process()) return return_log(name, false, "custom_rom_hide_should_filter_dirent", 2);
 
     if (name[0] == '.' && (name[1] == '\0'
             || (name[1] == '.' && name[2] == '\0'))) {
-        return false;
+        return return_log(name, false, "custom_rom_hide_should_filter_dirent", 1);
     }
 
     bool maybe = false;
@@ -599,7 +795,7 @@ bool custom_rom_hide_should_filter_dirent(int dirfd, const char* name) {
     }
     if (!maybe && basename_is_rom_artifact(name)) maybe = true;
     if (!maybe && name_has_rom_keyword(name)) maybe = true;
-    if (!maybe) return false;
+    if (!maybe) return return_log(name, false, "custom_rom_hide_should_filter_dirent", 1);
 
     int saved_errno = errno;
     bool result = false;
@@ -616,7 +812,7 @@ bool custom_rom_hide_should_filter_dirent(int dirfd, const char* name) {
     }
 
     errno = saved_errno;
-    return result;
+    return return_log(name, result, "custom_rom_hide_should_filter_dirent", 0);
 }
 
 // Descriptor links expose the resolved proc path, not the alias used to open it.
@@ -707,7 +903,7 @@ static bool is_tracked_proc_fd_link(const char* path) {
 
 ssize_t custom_rom_hide_readlinkat_post(int dirfd, const char* path, char* buf,
                                         size_t size, ssize_t ret) {
-    if (ret <= 0 || !buf || !is_app_process()) return ret;
+    if (ret <= 0 || !buf || !is_app_process()) return return_log_ssize_t(path, ret, "custom_rom_hide_readlinkat_post", 2);
     int saved_errno = errno;
     bool has_prefix = ret >= static_cast<ssize_t>(HIDE_MEMFD_LINK_PREFIX_LEN) &&
                       memcmp(buf, HIDE_MEMFD_LINK_PREFIX, HIDE_MEMFD_LINK_PREFIX_LEN) == 0;
@@ -720,19 +916,19 @@ ssize_t custom_rom_hide_readlinkat_post(int dirfd, const char* path, char* buf,
     ssize_t n = syscall(__NR_readlinkat, dirfd, path, link, sizeof(link) - 1);
     if (n <= 0 || static_cast<size_t>(n) >= sizeof(link) - 1) {
         errno = saved_errno;
-        return ret;
+        return return_log(path, ret, "custom_rom_hide_readlinkat_post", 1);
     }
     link[n] = '\0';
     char real_path[512];
     if (!decode_encoded_memfd_link(link, real_path, sizeof(real_path))) {
         errno = saved_errno;
-        return ret;
+        return return_log(path, ret, "custom_rom_hide_readlinkat_post", 1);
     }
     size_t path_len = strlen(real_path);
     size_t to_copy = path_len < size ? path_len : size;
     memcpy(buf, real_path, to_copy);
     errno = saved_errno;
-    return static_cast<ssize_t>(to_copy);
+    return return_log_ssize_t(path, static_cast<ssize_t>(to_copy), "custom_rom_hide_readlinkat_post", 0);
 }
 
 enum ProcFilterType {
@@ -1005,8 +1201,8 @@ static bool drop_smaps_line(const char* line, void* raw_ctx) {
 }
 
 int custom_rom_hide_filter_proc(const char* path) {
-    if (!is_app_process()) return -1;
-    if (!path || reinterpret_cast<uintptr_t>(path) < 0x1000000) return -1;
+    if (!is_app_process()) return return_log_int(path, -1, "custom_rom_hide_filter_proc", 2);
+    if (!path || reinterpret_cast<uintptr_t>(path) < 0x1000000) return return_log_int(path, -1, "custom_rom_hide_filter_proc", 1);
 
     int saved_errno = errno;
     ProcFilterType type = get_proc_filter_type(path);
@@ -1024,15 +1220,15 @@ int custom_rom_hide_filter_proc(const char* path) {
                 ? write_spoofed_mount_line : write_line_raw;
         int mem_fd = filter_file_with(path, drop_proc_line, writer, &type);
         errno = saved_errno;
-        return mem_fd;
+        return return_log_int(path, mem_fd, "custom_rom_hide_filter_proc", 0);
     }
 
     size_t file_size = 0;
     char* content = read_file_raw(path, &file_size);
-    if (!content) { errno = saved_errno; return -1; }
+    if (!content) { errno = saved_errno; return return_log_int(path, -1, "custom_rom_hide_filter_proc", 1); }
 
     int mem_fd = create_encoded_memfd(path);
-    if (mem_fd < 0) { free(content); errno = saved_errno; return -1; }
+    if (mem_fd < 0) { free(content); errno = saved_errno; return return_log_int(path, -1, "custom_rom_hide_filter_proc", 1); }
 
     bool ok = filter_cmdline(mem_fd, content, file_size);
     free(content);
@@ -1040,10 +1236,10 @@ int custom_rom_hide_filter_proc(const char* path) {
         custom_rom_hide_unregister_fd(mem_fd);
         raw_close(mem_fd);
         errno = saved_errno;
-        return -1;
+        return return_log_int(path, -1, "custom_rom_hide_filter_proc", 1);
     }
     errno = saved_errno;
-    return mem_fd;
+    return return_log_int(path, mem_fd, "custom_rom_hide_filter_proc", 0);
 }
 
 static bool is_selinux_policy_path(const char* path) {
@@ -1077,15 +1273,15 @@ static bool drop_sepolicy_line(const char* line, void*) {
 }
 
 int custom_rom_hide_filter_sepolicy(const char* path) {
-    if (!is_app_process()) return -1;
-    if (!path || reinterpret_cast<uintptr_t>(path) < 0x1000000) return -1;
+    if (!is_app_process()) return return_log_int(path, -1, "custom_rom_hide_filter_proc", 2);
+    if (!path || reinterpret_cast<uintptr_t>(path) < 0x1000000) return return_log_int(path, -1, "custom_rom_hide_filter_proc", 1);
 
     int saved_errno = errno;
-    if (!is_selinux_policy_path(path)) { errno = saved_errno; return -1; }
+    if (!is_selinux_policy_path(path)) { errno = saved_errno; return return_log_int(path, -1, "custom_rom_hide_filter_proc", 1); }
 
     int mem_fd = filter_file_with(path, drop_sepolicy_line, write_line_raw, nullptr);
     errno = saved_errno;
-    return mem_fd;
+    return return_log_int(path, mem_fd, "custom_rom_hide_filter_proc", 0); 
 }
 
 #ifndef CUSTOM_ROM_HIDE_FILTER_VINTF
@@ -1111,17 +1307,17 @@ static const char* const kVintfFilterKeywords[] = {
 int custom_rom_hide_filter_vintf(const char* path) {
 #if !CUSTOM_ROM_HIDE_FILTER_VINTF
     (void) path;
-    return -1;
+    return return_log_int(path, -1, "custom_rom_hide_filter_vintf", 1);
 #else
-    if (!is_app_process()) return -1;
-    if (!path || reinterpret_cast<uintptr_t>(path) < 0x1000000) return -1;
+    if (!is_app_process()) return return_log_int(path, -1, "custom_rom_hide_filter_vintf", 2); 
+    if (!path || reinterpret_cast<uintptr_t>(path) < 0x1000000) return return_log_int(path, -1, "custom_rom_hide_filter_vintf", 1); 
 
     int saved_errno = errno;
     bool match = false;
     for (const char* const* p = kVintfFilterPaths; *p; ++p) {
         if (strcmp(path, *p) == 0) { match = true; break; }
     }
-    if (!match) { errno = saved_errno; return -1; }
+    if (!match) { errno = saved_errno; return return_log_int(path, -1, "custom_rom_hide_filter_vintf", 1);  }
 
     struct VintfCtx {
         int skip_depth;
@@ -1147,10 +1343,10 @@ int custom_rom_hide_filter_vintf(const char* path) {
         custom_rom_hide_unregister_fd(mem_fd);
         raw_close(mem_fd);
         errno = saved_errno;
-        return -1;
+        return return_log_int(path, -1, "custom_rom_hide_filter_vintf", 1); ;
     }
     errno = saved_errno;
-    return mem_fd;
+    return return_log_int(path, mem_fd, "custom_rom_hide_filter_vintf", 0); 
 #endif
 }
 
@@ -1167,6 +1363,7 @@ static const PropOverride kSpoofedValueProps[] = {
     {"ro.build.tags", "release-keys"},
     {"ro.secure", "1"},
     {"ro.adb.secure", "1"},
+    {"ro.boot.verifiedbootstate", "green"},
     {nullptr, nullptr}
 };
 
@@ -1174,32 +1371,32 @@ bool custom_rom_hide_should_spoof_prop(const char* name, char* value) {
     if (!name || !value) return false;
     if (reinterpret_cast<uintptr_t>(name) < 0x1000000) return false;
     if (reinterpret_cast<uintptr_t>(value) < 0x1000000) return false;
-    if (!is_app_process()) return false;
+    if (!is_app_process()) return return_log(name, false, "custom_rom_hide_should_spoof_prop", 2); 
     for (const char* const* p = kSpoofedEmptyProps; *p; ++p) {
-        if (strcmp(name, *p) == 0) { value[0] = '\0'; return true; }
+        if (strcmp(name, *p) == 0) { value[0] = '\0'; return return_log(name, true, "custom_rom_hide_should_spoof_prop", 0); }
     }
     for (const PropOverride* o = kSpoofedValueProps; o->name; ++o) {
-        if (strcmp(name, o->name) == 0) { strcpy(value, o->value); return true; }
+        if (strcmp(name, o->name) == 0) { strcpy(value, o->value); return return_log(name, true, "custom_rom_hide_should_spoof_prop", 0); }
     }
-    return false;
+    return return_log(name, false, "custom_rom_hide_should_spoof_prop", 1); ;
 }
 
 bool custom_rom_hide_should_hide_prop(const char* name) {
     if (!name || reinterpret_cast<uintptr_t>(name) < 0x1000000) return false;
-    if (!is_app_process()) return false;
+    if (!is_app_process()) return return_log(name, false, "custom_rom_hide_should_hide_prop", 2); 
     for (const char* const* p = kSpoofedEmptyProps; *p; ++p) {
-        if (strcmp(name, *p) == 0) return true;
+        if (strcmp(name, *p) == 0) return return_log(name, true, "custom_rom_hide_should_hide_prop", 0); 
     }
-    return false;
+    return return_log(name, false, "custom_rom_hide_should_hide_prop", 1); 
 }
 
 const char* custom_rom_hide_get_prop_override(const char* name) {
     if (!name || reinterpret_cast<uintptr_t>(name) < 0x1000000) return nullptr;
-    if (!is_app_process()) return nullptr;
+    if (!is_app_process()) return return_log_p(name, nullptr, "custom_rom_hide_get_prop_override", 2); 
     for (const PropOverride* o = kSpoofedValueProps; o->name; ++o) {
-        if (strcmp(name, o->name) == 0) return o->value;
+        if (strcmp(name, o->name) == 0) return return_log_p(name,  o->value, "custom_rom_hide_get_prop_override", 0); 
     }
-    return nullptr;
+    return return_log_p(name, nullptr, "custom_rom_hide_get_prop_override", 1); 
 }
 
 bool custom_rom_hide_is_app_process() {
@@ -1312,3 +1509,26 @@ void custom_rom_hide_spoof_fd_statfs(int fd, struct statfs* sf) {
     normalize_statfs_type(sf);
     errno = saved_errno;
 }
+
+extern "C" int __uname(struct utsname* buf);
+
+extern "C" int uname(struct utsname* buf) {
+    int result = __uname(buf);
+    if (result == -1) return -1;
+
+    const char* pr = getprogname();
+
+    if (pr && atomic_load(&g_filter_active)) {
+        strlcpy(buf->release, "6.1.145-android14-11-gb812b232b095-ab14605088", sizeof(buf->release));
+        strlcpy(buf->version, "#1 SMP PREEMPT Wed Dec 17 08:45:53 UTC 2025", sizeof(buf->version));
+        strlcpy(buf->machine, "aarch64", sizeof(buf->machine));
+    }
+
+    if( atomic_load(&g_filter_debug) ) {
+        async_safe_format_log(ANDROID_LOG_DEBUG, LOG_TAG, "uname [%s] for UID %d (PID %d) is (%s %s %s)", 
+                              pr, getuid(), getpid(),buf->release,buf->version,buf->machine);
+    }
+
+    return result;
+}
+
